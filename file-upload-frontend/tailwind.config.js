@@ -1,3 +1,6 @@
+// استخدم require بدلاً من import
+const { fontFamily } = require('tailwindcss/defaultTheme');
+
 /** @type {import('tailwindcss').Config} */
 module.exports = {
   content: [
@@ -6,7 +9,12 @@ module.exports = {
     "./components/**/*.{js,ts,jsx,tsx,mdx}",
   ],
   theme: {
-    extend: {},
+    extend: {
+      fontFamily: {
+        // هذا القسم صحيح
+        sans: ['var(--font-alexandria)', ...fontFamily.sans],
+      },
+    },
   },
   plugins: [],
-}
+};
