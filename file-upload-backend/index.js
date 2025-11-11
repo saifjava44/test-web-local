@@ -1,23 +1,22 @@
+// =================================================================
+// الكود النهائي مع نظام تشخيصي قوي للأخطاء
+// =================================================================
+
 require('dotenv').config();
 const express = require('express');
-const multer = require('multer');
-const path = require('path');
-const { Pool } = require('pg');
 const cors = require('cors');
-const http = require('http'); // ✨ 1. استيراد مكتبة http للتحكم في السيرفر
+// ✨ 1. استيراد EVENTS للتعامل مع الأحداث بشكل صريح
+const { Server, EVENTS } = require('@tus/server'); 
+const { FileStore } = require('@tus/file-store');
+const { Pool } = require('pg');
+const path = require('path');
+const fs = require('fs/promises');
 
 const app = express();
-const PORT = 3001;
+const port = 3001;
+const host = '0.0.0.0';
 
-// السماح بالطلبات من الواجهة الأمامية
-app.use(cors());
-
-// ✨ 2. زيادة حدود حجم الطلب لـ Express (مثلاً إلى 10 جيجابايت)
-// هذا مهم للبيانات الأخرى التي قد تأتي مع الطلب، على الرغم من أن Multer يعالج الملفات بشكل منفصل
-app.use(express.json({ limit: '10gb' }));
-app.use(express.urlencoded({ extended: true, limit: '10gb' }));
-
-// إعداد الاتصال بقاعدة البيانات
+// --- إعداد قاعدة البيانات ---
 const pool = new Pool({
     user: process.env.DB_USER,
     host: process.env.DB_HOST,
@@ -26,68 +25,76 @@ const pool = new Pool({
     port: process.env.DB_PORT,
 });
 
-// إعداد Multer لتخزين الملفات
-const storage = multer.diskStorage({
-    destination: function (req, file, cb) {
-        cb(null, 'uploads/');
-    },
-    filename: function (req, file, cb) {
-        const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-        cb(null, file.fieldname + '-' + uniqueSuffix + path.extname(file.originalname));
-    }
+// --- إعداد سيرفر Tus ---
+// ✨ 2. لقد قمنا بإزالة onUploadFinish من هنا لتعريفه بشكل منفصل
+const tusServer = new Server({
+    path: '/files',
+    datastore: new FileStore({
+        directory: path.resolve(process.cwd(), 'uploads'),
+    }),
 });
 
-// ✨ 3. تعديل إعدادات Multer لإضافة حدود حجم الملف
-const upload = multer({
-    storage: storage,
-    limits: {
-        fileSize: 10 * 1024 * 1024 * 1024 // 10 جيجابايت (10 * 1024 MB * 1024 KB * 1024 Bytes)
-    }
-});
-
-// نقطة النهاية (Endpoint) الخاصة برفع الملف
-app.post('/upload', upload.single('file'), async (req, res) => {
-    // التحقق من وجود الملف يتم أولاً
-    if (!req.file) {
-        return res.status(400).send('لم يتم رفع أي ملف.');
-    }
+// ✨ 3. تعريف الحدث بشكل منفصل وصريح (الطريقة الأكثر ضماناً)
+tusServer.on(EVENTS.POST_FINISH, async (req, res, file) => {
+    console.log('===================================================');
+    console.log(`[EVENT: POST_FINISH] اكتمل رفع الملف بنجاح!`);
+    console.log(`تفاصيل الملف المستلم:`, file);
+    console.log('===================================================');
 
     try {
-        const { originalname, filename, path: filePath } = req.file;
-        const { description } = req.body;
+        // --- خطوة إعادة تسمية الملف ---
+        const originalName = file.metadata.filename;
+        const extension = path.extname(originalName);
+        
+        const oldPath = path.resolve(process.cwd(), 'uploads', file.id);
+        const newFilenameWithExt = `${file.id}${extension}`;
+        const newPath = path.resolve(process.cwd(), 'uploads', newFilenameWithExt);
+        
+        console.log(`[FS] جاري إعادة تسمية الملف...`);
+        console.log(`   - من: ${oldPath}`);
+        console.log(`   - إلى: ${newPath}`);
 
+        // التحقق من وجود الملف قبل إعادة التسمية
+        await fs.access(oldPath);
+        console.log(`[FS] تم العثور على الملف المصدر.`);
+
+        await fs.rename(oldPath, newPath);
+        console.log('[FS] نجحت إعادة تسمية الملف!');
+
+        // --- خطوة الحفظ في قاعدة البيانات ---
+        const description = file.metadata.description || 'لا يوجد وصف';
+        const filePathInDb = `uploads/${newFilenameWithExt}`;
+
+        console.log(`[DB] جاري الحفظ في قاعدة البيانات...`);
         const query = `
             INSERT INTO files (original_name, new_filename, file_path, description)
-            VALUES ($1, $2, $3, $4)
-            RETURNING *;
-        `;
-        const values = [originalname, filename, filePath, description];
+            VALUES ($1, $2, $3, $4) RETURNING *;`;
+        const values = [originalName, newFilenameWithExt, filePathInDb, description];
 
         const result = await pool.query(query, values);
-
-        console.log('تم حفظ الملف بنجاح:', result.rows[0]);
-        res.status(201).json({
-            message: 'تم رفع الملف وحفظ البيانات بنجاح!',
-            fileInfo: result.rows[0]
-        });
+        console.log('[DB] نجاح! تم حفظ السجل:', result.rows[0]);
 
     } catch (error) {
-        console.error('حدث خطأ:', error);
-        // التحقق إذا كان الخطأ بسبب تجاوز حجم الملف
-        if (error instanceof multer.MulterError && error.code === 'LIMIT_FILE_SIZE') {
-            return res.status(413).send('حجم الملف يتجاوز الحد المسموح به (10 جيجابايت).');
-        }
-        res.status(500).send('خطأ في السيرفر.');
+        console.error('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!');
+        console.error('!!! فشل حاسم أثناء معالجة ما بعد الرفع !!!');
+        console.error('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!');
+        console.error('الخطأ هو:', error);
     }
 });
 
-// ✨ 4. إنشاء وتشغيل السيرفر مع زيادة مهلة الانتظار
-const server = http.createServer(app);
 
-server.listen(PORT, () => {
-    console.log(`🚀 السيرفر الخلفي يعمل على المنفذ http://192.186.220.63:${PORT}`);
+// --- ربط Express مع Tus (Middleware) ---
+// ✨ 4. يجب وضع CORS قبل أي مسارات أخرى
+app.use(cors());
+
+const tusMiddleware = tusServer.handle.bind(tusServer);
+app.use('/files', tusMiddleware);
+
+app.get('/', (req, res) => {
+    res.send('مرحباً! سيرفر الرفع يعمل.');
 });
 
-// زيادة مهلة الانتظار (مثلاً إلى 30 دقيقة) لتجنب انقطاع الاتصال أثناء رفع الملفات الكبيرة
-// 30 دقيقة * 60 ثانية * 1000 ميلي ثانية
-server.timeout = 30 * 60 * 1000;
+// --- تشغيل السيرفر ---
+app.listen(port, host, () => {
+    console.log(`🚀 السيرفر الخلفي يعمل على http://${host}:${port}`);
+});
