@@ -39,7 +39,7 @@ export default function HomePage() {
 
     const upload = new tus.Upload(file, {
         // ✨ تأكد من أن هذا هو عنوان IP الثابت الصحيح + المسار الجديد
-        endpoint: "http://192.186.220.63:3001/files/",
+        endpoint: "http://192.168.0.103:3001/files/",
         retryDelays: [0, 3000, 5000, 10000, 20000], // محاولة إعادة الاتصال عند الفشل
         metadata: {
             filename: file.name,
